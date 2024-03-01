@@ -1,0 +1,215 @@
+---
+title: "Model development"
+author: "Lukas"
+date: "2024-02-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=F,warning=F,cache=T)
+
+library(tm)
+library(data.table)
+library(doParallel) 
+library(stringr)
+library(knitr)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(RWeka)
+```
+
+```{r functions, include=F}
+#Function 1: check the amount of words we're working with
+### Takes a character input and counts the amount of words
+### This is required for our prediction function to know what ngrams to look for
+
+wordCount <- function(x){
+  length(unlist((strsplit(x,' '))))
+}
+
+#Function 2: ngram frequency dataframe creator
+
+### takes the frequency matrix, obtained from the document term matrix
+### and turns it into a dataframe with three headers,
+### the prov header: provided sequence to match with
+### A frequency of occurence (so we take the most likely one)
+### a pred header, with the last word in that respective ngram
+
+ngram_df_maker<-function(x){
+  ngram_df<-data.frame(prov=character(length(x)),pred=character(length(x)), freq=integer(length(x)))
+  
+  for (i in 1:length(x)) {
+    #Extract full expression
+    ngram <- names(x)[[i]]
+    #Split ngram into words
+    ngram_words<-unlist(strsplit(ngram," "))
+    #Extract count
+    freq=x[[i]]
+    #Create a row for the dataframe
+    ngram_row<-c(paste(ngram_words[1:length(ngram_words)-1],collapse=' '), #all words except the last
+                  ngram_words[[length(ngram_words)]], #last word
+                  freq) #frequency of occurrence
+    #Add the row to the dataframe
+    ngram_df[i,]<-ngram_row
+  }
+  ngram_df
+}
+
+#Function 3: predicts the word
+predictWord <- function(x,uni,bi,tri,quad) {
+  x<-(tolower(x))
+  if (wordCount(x) == 0){
+    return("no words provided")}
+  predWord<-character(0)
+  
+  if (wordCount(x) >= 3) {
+    phrase <- paste(unlist(str_split(x,' '))[(wordCount(x)-2):wordCount(x)],collapse=' ')
+    predWord <- quad$pred[quad$prov == phrase] 
+  }
+    if (length(predWord)>0){return(predWord[1:3])}
+  
+  if (wordCount(x) >= 2) {
+    phrase <- paste(unlist(str_split(x,' '))[(wordCount(x)-1):wordCount(x)],collapse=' ')
+    predWord <- tri$pred[tri$prov == phrase] 
+  }
+   if  (length(predWord)>0){return(predWord[1:3])}
+  
+  if (wordCount(x) >= 1) {
+    phrase <- paste(unlist(str_split(x,' '))[wordCount(x)],collapse=' ')
+    predWord <- bi$pred[bi$prov == phrase] 
+  }
+  if  (length(predWord)>0){return(predWord[1:3])}
+     else predWord <- sample(uni$pred,1)
+  return(predWord[1:3])
+}
+
+```
+
+## Model development
+
+In this document we'll cover the model development for the text prediction. The [**tm** package vignette](https://cran.r-project.org/web/packages/tm/vignettes/tm.pdf) will be used as inspiration for cleaning the text data and achieving Term-Document matrices as a basis of prediction.
+
+### Data acquisition
+Similarly to the milestone report, the data is acquired and read into R. 
+
+```{r,eval=F}
+url_file<-'https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip'
+download.file(url_file,'SwiftKey.zip')
+
+unzip('SwiftKey.zip')
+```
+
+```{r}
+twitter<-readLines('final/en_US/en_US.twitter.txt',encoding='UTF-8')
+blogs<-readLines('final/en_US/en_US.blogs.txt',encoding='UTF-8')
+news<-readLines('final/en_US/en_US.news.txt',encoding='UTF-8')
+```
+
+We'll start by taking 100k samples from the combined data as a preliminary training data set.
+```{r}
+set.seed(123)
+training<-sample(c(twitter,blogs,news),100000)
+corpus_training<-VCorpus(VectorSource(training))
+```
+
+### Data preprocessing
+
+We want to process the data to get rid of excess white space, punctuation, numbers, stop words and whatever else may interfere with the prediction of words. All these preprocessing steps are accommodated in the tm package, in the function **tm_map**. The available preprocessing options are called upon below. 
+
+```{r,comment=''}
+getTransformations()
+```
+
+```{r}
+corpus_training<-tm_map(corpus_training,removeNumbers)
+corpus_training<-tm_map(corpus_training,removePunctuation)
+corpus_training<-tm_map(corpus_training,stripWhitespace)
+corpus_training<-tm_map(corpus_training,content_transformer(tolower))
+
+# debatable whether stopwords should be removed, the algorithm loses a lot of context
+# if all the stopwords are to be removed
+```
+### Designing n-gram tokenizers for n = 1:4
+
+For the tokenization, the RWeka package is used for its convenient NGramTokenizer function that contains all to be desired. 
+```{r}
+cl <- makeCluster(24)
+registerDoParallel(cl) 
+
+UnigramTokenizer <- function(x) {NGramTokenizer(x, Weka_control(min = 1, max = 1))}
+BigramTokenizer <- function(x) {NGramTokenizer(x, Weka_control(min = 2, max = 2))}
+TrigramTokenizer <- function(x) {NGramTokenizer(x, Weka_control(min = 3, max = 3))}
+QuadgramTokenizer <- function(x) {NGramTokenizer(x, Weka_control(min = 4, max = 4))}
+
+dtm_uni = DocumentTermMatrix(corpus_training, control = list(tokenize = UnigramTokenizer))
+dtm_bi = DocumentTermMatrix(corpus_training, control = list(tokenize = BigramTokenizer))
+dtm_tri = DocumentTermMatrix(corpus_training, control = list(tokenize = TrigramTokenizer))
+dtm_quad = DocumentTermMatrix(corpus_training, control = list(tokenize = QuadgramTokenizer))
+
+stopCluster(cl)
+```
+
+### Reducing the frequencing matrices
+
+Since we've got so many observations, it's recommended to remove the sparse terms, i.e., observations that barely occur to drastically reduce the matrix size. The sparsity cut-off should however be set on an ngram level. For multiple word associations (bi-, tri- and quad-gram), each individual term is incredibly sparse in itself, often resulting in a 3.2 MB document term matrix. This corresponds to a completely empty matrix with the 50.000 observations we're training it on. We'll try to encompass as much information in an as small file size.
+
+The sparsity was therefore obtained through trial and error for the sparse document matrices (dtms objects) to have a file size larger than 3.2 MB (non-empty), but substantially smaller than the original matrices. 
+
+```{r}
+dtms_uni<-removeSparseTerms(dtm_uni , 0.99)
+dtms_bi<-removeSparseTerms(dtm_bi , 0.9999)
+dtms_tri<-removeSparseTerms(dtm_tri , 0.99998)
+dtms_quad<-removeSparseTerms(dtm_quad , 0.99998)
+
+
+unigram_freq <- sort(colSums(as.matrix(dtms_uni)),decreasing=TRUE)
+bigram_freq <- sort(colSums(as.matrix(dtms_bi)),decreasing=TRUE)
+trigram_freq <- sort(colSums(as.matrix(dtms_tri)),decreasing=TRUE)
+quadgram_freq <- sort(colSums(as.matrix(dtms_quad)),decreasing=TRUE)
+```
+
+### Creating the prediction model as a collection of dataframes 
+
+Our prediction model consists of four data frames that correspond to each of the n-grams. They will be addressed in decreasing order of n. This implies that for a given prediction, the prediction algorithm will first assess whether there are three words present that it can use to predict a fourth through the quadgram data table and so forth. These decision tables will have three headers. 
+
+* **prov** - the provided word(s). An n-1 length sentence. (unigrams are the exception)
+* **pred** - a predicted word for the provided word(s)
+* **freq** - the frequency of occurrence associated with that word combination
+
+
+I made a custom function ngram_df_maker to make the data frames or decision tables for ngrams that have n larger than 1. It is available in the Functions.R file.  
+```{r}
+unigram_DF<-data.frame(freq=unigram_freq)
+unigram_DF$pred<-rownames(unigram_DF)
+
+bigram_DF<-ngram_df_maker(bigram_freq)
+trigram_DF<-ngram_df_maker(trigram_freq)
+quadgram_DF<-ngram_df_maker(quadgram_freq)
+```
+
+Another custom function predictWord takes the following four inputs:
+
+* x - the phrase for which we want a predicted word
+* uni - the unigram data.frame, created by ngram_df_maker
+* bi - the bigram data.frame, created by ngram_df_maker
+* tri - the trigram data.frame, created by ngram_df_maker
+
+### Testing the prediction function
+
+```{r}
+predictWord('i have been in the mall with the first time since the great beginning to be a part of the world trade center in my ass and', 
+            uni=unigram_DF,
+            bi=bigram_DF,
+            tri=bigram_DF,
+            quad=quadgram_DF)
+```
+
+### exporting the required data sets
+
+Herein, we export the data sets corresponding to the 4 ngram data.frames. These, along with the functions in Functions.R are all that's required to perform word predictions. 
+
+```{r}
+save(unigram_DF, bigram_DF,trigram_DF,quadgram_DF, file = "ngram_data.RData")
+```
+

@@ -1,0 +1,195 @@
+---
+title: "Milestone report"
+author: "Lukas"
+date: "2024-02-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=F,warning=F,cache=T)
+
+library(tm)
+library(data.table)
+library(doParallel) 
+library(stringr)
+library(knitr)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(tidytext)
+library(tokenizers)
+```
+
+## Milestone report
+
+This document concerns the milestone report for the second week of the tenth installment of the data science specialization course, the capstone project. This project covers the creation of a text prediction model. Specifically, the model would provide a single word addition, when provided with an incomplete sentence/ string of words. The available training data is available across three *.txt files*, covering text from blogs, news and twitter. 
+
+### Data acquisition
+
+The data is available from the course's corporate partner SwiftKey. The data can be acquired and read into R with the following code. The unzipped file contains a folder, called final, containing the folders for datasets for four sets of languages, namely *German* **(de_DE)**, *English* **(en_US)**, *Finnish* **(fi_FI)** and *Russian* **(ru_RU)**. The prediction model that will be developed will only concern the English training data.  
+```{r,eval=F}
+url_file<-'https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip'
+download.file(url_file,'SwiftKey.zip')
+
+unzip('SwiftKey.zip')
+```
+
+```{r,cache=T}
+twitter<-readLines('final/en_US/en_US.twitter.txt')
+blogs<-readLines('final/en_US/en_US.blogs.txt')
+news<-readLines('final/en_US/en_US.news.txt')
+```
+
+### Defining a function to reduce the lines to words
+
+This function merely extracts all the words from the lists that are twitter, blogs and news, and appends them in a vector. It select all stretches of alphabetical characters, stored in a list, which is subsequently unlisted, whereafter the characters are put to lower case in a dataframe. 
+```{r,cache=T}
+word_extractor <- function(x){
+  output<-data.frame(tolower(unlist(strsplit(x,split="[^[:alpha:]]+"))))
+  colnames(output)<-'word'
+  output
+}
+
+w_twitter<-word_extractor(twitter)
+w_blogs<-word_extractor(blogs)
+w_news<-word_extractor(news)
+```
+
+### Creating a summary data.frame of the three datasets
+
+```{r}
+summary_table<-data.frame(matrix(nrow=2,ncol=4))
+colnames(summary_table)<-c('twitter','blogs','news','combined')
+rownames(summary_table)<-c('lines','words')
+
+summary_table[1,]<-c(length(twitter),length(blogs),length(news),length(c(twitter,blogs,news)))
+summary_table[2,]<-c(length(w_twitter$word),length(w_blogs$word),length(w_news$word),
+                     length(c(w_twitter$word,w_blogs$word,w_news$word)))
+
+kable(summary_table)
+```
+
+While the twitter dataset has by far the most entries (lines), it is however superceded by the blogs dataset in amount of words. The news dataset is substantially smaller than either of the other datasets in both word and line count.   
+
+### Constructing a word frequency dataframe combining all three text sources 
+```{r}
+twitter_wfreq<-w_twitter%>%
+  count(word,sort=T)%>%
+  mutate(id='twitter')
+
+blogs_wfreq<-w_blogs%>%
+  count(word,sort=T)%>%
+  mutate(id='blogs')
+
+news_wfreq<-w_news%>%
+  count(word,sort=T)%>%
+  mutate(id='news')
+
+word_freq<-rbind(twitter_wfreq,blogs_wfreq,news_wfreq)
+```
+
+### Constructing a histogram of the word frequency
+
+For each dataset (twitter,blogs and news), the word frequency is displayed for the 20 most frequently occurring words. 
+```{r,out.width='100%'}
+
+top20wf<-word_freq%>%
+  group_by(id)%>%
+  slice_head(n=20)
+
+gwords<-ggplot(top20wf,aes(x=reorder(word,n),y=n,col=id,fill=id))+
+  geom_col()+
+  coord_flip()+
+  xlab('word')+
+  ylab('count')+
+  facet_grid(id~.,scales='free_y')
+
+ggplotly(gwords)
+```
+
+### Constructing a boxplot of the line lengths
+
+For each dataset (twitter, blogs and news) the boxplot distribution of the line length is provided through **nchar()**. This is useful to see whether a dataset contains either particularly long or short lines of text. 
+```{r, out.width='100%'}
+
+par(mfrow=(c(1,3)))
+boxplot(nchar(twitter),main='twitter')
+boxplot(nchar(blogs),main='blogs')
+boxplot(nchar(news),main='news')
+```
+
+Up until 2017, from before which this data originates, the character limit of twitter was 140, providing way shorter line lengths than the other two sources of text data. It can be observed that the blogs data has some incredibly large entries. 
+
+### Exploring the dataset with n-gram tokenizers
+
+Up until now we've looked at the data without its context, i.e., we've considered individual line and word data. Herein we'll incorporate and explore the contextual use of a particular word. 
+
+1. Which words are commonly associated with one another?
+
+2. Across how many words can we feasibly model this word association?
+
+We'll make use of the **tokenizers** package. It contains the function **tokenize_ngrams**. The function already performs most of the work. It does however not contain any data cleaning code. Getting rid of punctuation and numbers prior to running this function is advised. 
+
+```{r,cache=T}
+all_data<-c(twitter,blogs,news) #combining all three datasets
+all_data<-
+  all_data%>%
+  removeNumbers()%>%
+  removePunctuation()
+
+#' Sampling 5% of the data
+#' There is a skew towards twitter lines (more abundant)
+subset<-sample(all_data,length(all_data)*0.05) 
+
+tokenized_subset<-tokenize_ngrams(subset,lowercase = T,n=4,n_min=1)
+```
+
+### Plotting the frequency of word combinations 
+
+In this plot we show the frequency of word combinations (n-grams) for n = 1:4, i.e., depicting unigrams, bigrams, trigrams and quadgrams. The code above demonstrates the creation of all ngrams in a single dataframe, but it makes it hard to keep track of 'n' in this instance. Declaring them individually and assigning them their gram identifier, reduces computation time. 
+
+```{r,out.width='105%',cache=T}
+unigrams<-data.frame(unlist(tokenize_ngrams(subset,lowercase = T,n=1,n_min=1,
+                                            stopwords = stop_words$word)))
+bigrams<-data.frame(unlist(tokenize_ngrams(subset,lowercase = T,n=2,n_min=2,
+                                            stopwords = stop_words$word)))
+trigrams<-data.frame(unlist(tokenize_ngrams(subset,lowercase = T,n=3,n_min=3,
+                                            stopwords = stop_words$word)))
+quadgrams<-data.frame(unlist(tokenize_ngrams(subset,lowercase = T,n=4,n_min=4,
+                                             stopwords = stop_words$word)))
+
+colnames(unigrams)<-'ngram'
+colnames(bigrams)<-'ngram'
+colnames(trigrams)<-'ngram'
+colnames(quadgrams)<-'ngram'
+
+unigrams$id<-'uni'
+bigrams$id<-'bi'
+trigrams$id<-'tris'
+quadgrams$id<-'quad'
+
+ngrams<-rbind(unigrams,bigrams,trigrams,quadgrams)
+
+freqngram<-ngrams%>%
+  group_by(id)%>%
+  count(ngram,sort=T)%>%
+  slice_head(n=20)
+
+gram_plot<-ggplot(freqngram,aes(x=reorder(ngram,n),y=n,color=id,fill=id))+
+  geom_col()+
+  coord_flip()+
+  xlab('')+
+  ylab('count')+
+  facet_grid(id~.,scales='free_y')+
+  theme(axis.text.x = element_text(size =6),
+        axis.text.y = element_text(size =5))
+
+ggplotly(gram_plot)
+```
+
+
+```{r}
+VCorpus(VectorSource(ngrams$ngram))
+```
+
+

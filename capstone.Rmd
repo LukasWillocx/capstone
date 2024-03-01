@@ -1,0 +1,121 @@
+---
+title: "Capstone project"
+author: "Lukas"
+date: "2024-02-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=F,warning=F)
+
+library(tm)
+library(data.table)
+library(doParallel) 
+library(stringr)
+```
+
+## Data acquisition
+
+```{r,eval=F}
+url_file<-'https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip'
+download.file(url_file,'SwiftKey.zip')
+
+unzip('SwiftKey.zip')
+```
+
+## Answering the quiz questions (Week 1)
+#### How many lines of text in en_US_twitter.txt?
+
+```{r}
+length(readLines('final/en_US/en_US.twitter.txt'))
+```
+
+#### What is the length of the longest line in any of the three text files?
+
+```{r}
+paste(max(nchar(readLines('final/en_US/en_US.twitter.txt'))), 'in twitter') 
+paste(max(nchar(readLines('final/en_US/en_US.blogs.txt'))), 'in blogs')
+paste(max(nchar(readLines('final/en_US/en_US.news.txt'))), 'in news')
+```
+
+#### What is the love over hate ratio in the twitter dataset?
+
+```{r}
+words_twitter<-readLines('final/en_US/en_US.twitter.txt')
+sum(str_detect(words_twitter,'love'))/sum(str_detect(words_twitter,'hate'))
+```
+
+#### There's one tweet that contains 'biostats', what does it say?
+
+```{r}
+ind<-str_detect(words_twitter,'biostats')
+words_twitter[ind]
+```
+
+#### How many times does the following exact string appear: "A computer once beat me at chess, but it was no match for me at kickboxing"?
+
+```{r}
+sum(str_detect(words_twitter,"A computer once beat me at chess, but it was no match for me at kickboxing"))
+```
+
+### Creating a small subset of data
+
+The .txt files are large. There are three datasets, each amounting to 200MB. The blogs dataset is subsetted for testing by reading its first 1000 lines of text. This subset of data is further denoted as subset_data.txt. 
+```{r}
+con <- file('final/en_US/en_US.blogs.txt', "r") 
+write.table(readLines(con, 1000),'subset_data.txt') 
+close(con)
+```
+
+
+Using the built-in tokenizers and evaluating whether they fit our needs of extracting all words from the text files, whilst discarding punctuation, numerals and preferably any profanity. 
+
+```{r,comment=''}
+cl <- makePSOCKcluster(12) 
+registerDoParallel(cl)
+
+subset_data<-read.table('subset_data.txt')
+
+#trying the three tokenizers in the tm package
+tk1<-data.frame(scan_tokenizer(subset_data))
+tk2<-data.frame(Boost_tokenizer(subset_data))
+tk3<-data.frame(MC_tokenizer(subset_data))
+
+stopCluster(cl)
+
+cbind(tk1[1:10,],tk2[1:10,],tk3[1:10,])
+```
+
+### Creating a custom tokenizer
+
+The built-in tokenizers get contraptions of words, numbers and punctuation messed up sometimes. A custom tokenizer would turn the text into a list of exclusively words and numbers. The tokenizer below is extremely simple but captures most of the essence of what we try to achieve. One major downfall this tokenizer does not account for is the inclusion of the letters 's' and 't' as standalone words. These correspond to the negations and genitives from the original text. These are currently not taken into account. 
+
+```{r,comment=''}
+tokenize <- function(x){
+  unlist(strsplit(x$x,split="[^[:alnum:]]+"))
+}
+
+subset_tokenized<-data.frame(tokenize(subset_data))
+
+subset_tokenized[1:10,]
+```
+
+
+### Profanity filtering
+
+We perform profanity filtering based on the 'bad words list' that facebook takes into account for its filtering algorithm. It is a character vector with 1108 elements that targets a wide range of profanity options. 
+```{r }
+prof_file_url<-'https://www.freewebheaders.com/download/files/facebook-bad-words-list_comma-separated-text-file_2022_05_01.zip'
+
+download.file(prof_file_url,'prof_file.zip')
+unzip('prof_file.zip')
+
+profanity_list<-data.frame(read.table('Facebook Bad Words List - May 1, 2022.txt',skip=14,sep=','))
+profanity_list<-transpose(profanity_list)[,1]
+```
+
+In the next code chunk we check whether any profanity is present in the subset data, amounting to `r dim(subset_tokenized)[1]` observations or words. There seems to be no profanity in this subset.
+```{r,comment=''}
+sum(subset_tokenized %in% profanity_list)
+```
+
